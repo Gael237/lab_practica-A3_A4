@@ -53,26 +53,71 @@ def _unb64(s: str) -> bytes:
 
 def hash_contrasena(contrasena: str, sal: bytes | None = None) -> str:
     """Devuelve 'pbkdf2$<iteraciones>$<sal>$<hash>' (todo en base64url)."""
-    # TODO(LAB): usa hashlib.pbkdf2_hmac("sha256", ...) con sal de os.urandom(16) e ITERACIONES
-    raise NotImplementedError("Pendiente: LAB · hash_contrasena")
+    sal_bytes = sal if sal is not None else os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", contrasena.encode("utf-8"), sal_bytes, ITERACIONES)
+    return f"pbkdf2${ITERACIONES}${_b64(sal_bytes)}${_b64(dk)}"
 
 
 def verificar_contrasena(contrasena: str, guardado: str) -> bool:
     """Recalcula el hash con la misma sal y compara en TIEMPO CONSTANTE."""
-    # TODO(LAB): separa el texto guardado por "$", recalcula con la misma sal y compara con hmac.compare_digest
-    raise NotImplementedError("Pendiente: LAB · verificar_contrasena")
+    try:
+        algoritmo, iter_str, sal_b64, hash_b64 = guardado.split("$")
+        if algoritmo != "pbkdf2":
+            return False
+        iteraciones = int(iter_str)
+        sal_bytes = _unb64(sal_b64)
+        hash_esperado = _unb64(hash_b64)
+    except Exception:
+        return False
+
+    dk = hashlib.pbkdf2_hmac("sha256", contrasena.encode("utf-8"), sal_bytes, iteraciones)
+    return hmac.compare_digest(dk, hash_esperado)
 
 
 def emitir_token(usuario: str, ahora: float | None = None) -> str:
     """Token 'payload.firma': payload = {sub, iat, exp} en base64url; firma = HMAC-SHA256 con TOKEN_SECRET."""
-    # TODO(LAB): payload = _b64(json {sub, iat, exp}); firma = _b64(hmac.new(_secreto(), payload, sha256)); devuelve "payload.firma"
-    raise NotImplementedError("Pendiente: LAB · emitir_token")
+    ts = int(ahora if ahora is not None else time.time())
+    datos = {
+        "sub": usuario,
+        "iat": ts,
+        "exp": ts + VIGENCIA_S,
+    }
+    payload_b64 = _b64(json.dumps(datos, separators=(",", ":")).encode("utf-8"))
+    firma = hmac.new(_secreto(), payload_b64.encode("utf-8"), hashlib.sha256).digest()
+    return f"{payload_b64}.{_b64(firma)}"
 
 
 def validar_token(token: str, ahora: float | None = None) -> str:
     """Devuelve el usuario si el token es válido; si no, ErrorAuth(401). Revisa formato, firma y expiración."""
-    # TODO(LAB): separa payload y firma, recalcula la firma, compara en tiempo constante y revisa exp; si algo falla: ErrorAuth(401, ...)
-    raise NotImplementedError("Pendiente: LAB · validar_token")
+    if not token or "." not in token:
+        raise ErrorAuth(401, "Token inválido o mal formado")
+    partes = token.split(".")
+    if len(partes) != 2:
+        raise ErrorAuth(401, "Token inválido o mal formado")
+
+    payload_b64, firma_b64 = partes
+    try:
+        firma_recibida = _unb64(firma_b64)
+    except Exception:
+        raise ErrorAuth(401, "Token inválido")
+
+    firma_esperada = hmac.new(_secreto(), payload_b64.encode("utf-8"), hashlib.sha256).digest()
+    if not hmac.compare_digest(firma_recibida, firma_esperada):
+        raise ErrorAuth(401, "Firma de token inválida")
+
+    try:
+        datos = json.loads(_unb64(payload_b64).decode("utf-8"))
+    except Exception:
+        raise ErrorAuth(401, "Payload de token inválido")
+
+    ts = ahora if ahora is not None else time.time()
+    if ts >= datos.get("exp", 0):
+        raise ErrorAuth(401, "Token expirado")
+
+    usuario = datos.get("sub")
+    if not usuario or not isinstance(usuario, str):
+        raise ErrorAuth(401, "Token sin sujeto válido")
+    return usuario
 
 
 @dataclass
@@ -99,5 +144,35 @@ class Autenticador:
 
     def login(self, email: str, contrasena: str, ahora: float | None = None) -> str:
         email, ahora = email.strip().lower(), ahora or time.time()
-        # TODO(LAB): cuenta fallos recientes (bloqueo 429), busca el hash, verifica, registra el intento SIN contraseña y usa MENSAJE_CREDENCIALES
-        raise NotImplementedError("Pendiente: LAB · login")
+        limite_tiempo = ahora - VENTANA_FALLOS_S
+       # 1. Contar fallos recientes en la ventana de tiempo
+        cur = self.db.execute(
+            "SELECT COUNT(*) FROM intentos WHERE email = ? AND ok = 0 AND ts >= ?",
+            (email, limite_tiempo),
+        )
+        fallos = cur.fetchone()[0]
+        if fallos >= MAX_FALLOS:
+            raise ErrorAuth(429, "Demasiados intentos fallidos. Intenta más tarde.")
+
+        # 2. Buscar el usuario y su hash guardado
+        cur = self.db.execute("SELECT hash FROM usuarios WHERE email = ?", (email,))
+        fila = cur.fetchone()
+
+        # 3. Verificar contraseña (o ejecutar hash dummy para mitigar timing attacks si no existe)
+        if fila is None:
+            hash_contrasena("dummy_password_timing_mitigation", b"0123456789abcdef")
+            valido = False
+        else:
+            valido = verificar_contrasena(contrasena, fila[0])
+
+        # 4. Registrar el intento en bitácora SIN guardar la contraseña
+        with self.db:
+            self.db.execute(
+                "INSERT INTO intentos (email, ts, ok) VALUES (?, ?, ?)",
+                (email, ahora, 1 if valido else 0),
+            )
+
+        if not valido:
+            raise ErrorAuth(401, MENSAJE_CREDENCIALES)
+
+        return emitir_token(email, ahora=ahora)
