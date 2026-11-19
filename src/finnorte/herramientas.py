@@ -8,7 +8,10 @@ o
 
 Reglas que el código hace cumplir (no el modelo):
 - Solo herramientas registradas; argumentos validados contra su esquema.
-- Herramientas marcadas `sensible=True` requieren confirmación humana.
+- Herramientas marcadas `sensible=True` requieren confirmación humana. `confirmar(h, args)` devuelve
+  True (aprobada: se ejecuta), False (rechazada: no se ejecuta) o None (PENDIENTE: la decisión llegará
+  en otra solicitud, como en el servicio web; tampoco se ejecuta).
+- Detector de repeticiones: la misma herramienta con los mismos argumentos no se ejecuta dos veces.
 - Máximo de pasos para evitar bucles; todo queda en la bitácora.
 """
 from __future__ import annotations
@@ -36,7 +39,7 @@ class Paso:
     n: int
     propuesta: dict
     resultado: Any = None
-    estado: str = ""                   # ejecutada | rechazada | invalida | respuesta | sin_confirmar
+    estado: str = ""                   # ejecutada | rechazada | pendiente | invalida | repetida | respuesta
 
 
 @dataclass
@@ -61,7 +64,7 @@ Herramientas disponibles:
 No inventes herramientas ni resultados. Si una herramienta falla, decide si reintentar o responder con lo que tienes."""
 
 
-def ejecutar_agente(tarea: str, herramientas: list[Herramienta], confirmar: Callable[[Herramienta, dict], bool] | None = None,
+def ejecutar_agente(tarea: str, herramientas: list[Herramienta], confirmar: Callable[[Herramienta, dict], bool | None] | None = None,
                     max_pasos: int = 5, contexto: str = "") -> ResultadoAgente:
     herrs = {h.nombre: h for h in herramientas}
     sistema = SISTEMA_AGENTE.format(catalogo=_catalogo(herrs))
